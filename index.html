@@ -16,6 +16,9 @@
       --externa: #865519; --externa-bg: #fff1d9;
       --personal: #6b4aa0; --personal-bg: #f1eafe;
       --alta: #b42e43; --media: #a05d00; --baja: #29724d;
+      --panel-hacer: #fbe3e3; --panel-hacer-line: #e7aaaa;
+      --panel-proceso: #fff0d8; --panel-proceso-line: #e8c181;
+      --panel-terminada: #e1f3e7; --panel-terminada-line: #9ccbad;
       --focus: #1479c9; --radius: 14px;
     }
     [data-theme="dark"] {
@@ -25,6 +28,9 @@
       --danger: #ff8f8f; --danger-bg: #3b2225; --shadow: 0 10px 30px rgba(0,0,0,.25);
       --integra: #84c9f4; --integra-bg: #18384d; --externa: #f0bd6e; --externa-bg: #49371e;
       --personal: #c6a9f2; --personal-bg: #37294d; --alta: #ff95a5; --media: #ffc26c; --baja: #7ed4a6;
+      --panel-hacer: #3a2529; --panel-hacer-line: #77424b;
+      --panel-proceso: #3a3021; --panel-proceso-line: #765b31;
+      --panel-terminada: #20372b; --panel-terminada-line: #3f7656;
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -84,6 +90,9 @@
     .progress > span { display:block; height:100%; background:var(--primary); transition:width .25s; }
     .columns { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:15px; align-items:start; }
     .column { min-height:180px; padding:13px; border:1px solid var(--line); border-radius:var(--radius); background:color-mix(in srgb,var(--surface) 70%,var(--bg)); }
+    .column[data-status="hacer"] { background:var(--panel-hacer); border-color:var(--panel-hacer-line); }
+    .column[data-status="proceso"] { background:var(--panel-proceso); border-color:var(--panel-proceso-line); }
+    .column[data-status="terminada"] { background:var(--panel-terminada); border-color:var(--panel-terminada-line); }
     .column.drag-over { outline:3px solid color-mix(in srgb,var(--primary) 55%,transparent); background:color-mix(in srgb,var(--primary) 8%,var(--surface)); }
     .column-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:11px; }
     .column-title { display:flex; align-items:center; gap:8px; margin:0; font-size:15px; }
