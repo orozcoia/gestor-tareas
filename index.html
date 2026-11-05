@@ -307,7 +307,7 @@
     const FAMILIES = ['INTEGRA','EXTERNA','Personal'];
     const PRIORITIES = ['Alta','Media','Baja'];
     const priorityOrder = { Alta:0, Media:1, Baja:2 };
-    const state = { tasks:[], view:'today', quickFamily:'', weekStart:null, selectedDate:null, editingId:null, cloudUser:null, cloudBusy:false, suppressCloudSave:false, lastSync:null };
+    const state = { tasks:[], view:'today', quickFamily:'', weekStart:null, selectedDate:null, editingId:null, cloudUser:null, cloudBusy:false, cloudDirty:false, cloudRevision:0, suppressCloudSave:false, lastSync:null };
     let supabaseClient=null, cloudSaveTimer=null, cloudSubscription=null;
     const $ = (selector, root=document) => root.querySelector(selector);
     const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
@@ -587,18 +587,23 @@
       } catch (error) { console.error(error); setCloudStatus('offline','Error de sincronización'); toast(`No se pudo sincronizar: ${error.message}`); }
       finally { state.cloudBusy=false; updateLastSyncText(); }
     }
-    function scheduleCloudSave() { clearTimeout(cloudSaveTimer); setCloudStatus('syncing','Guardando…'); cloudSaveTimer=setTimeout(pushToCloud,650); }
+    function scheduleCloudSave() {
+      state.cloudDirty=true; state.cloudRevision+=1; clearTimeout(cloudSaveTimer);
+      setCloudStatus('syncing','Guardando…'); cloudSaveTimer=setTimeout(pushToCloud,650);
+    }
     async function pushToCloud() {
       if (!supabaseClient || !state.cloudUser) return;
-      state.cloudBusy=true; setCloudStatus('syncing','Guardando…');
+      const revision=state.cloudRevision; cloudSaveTimer=null; state.cloudBusy=true; setCloudStatus('syncing','Guardando…');
       try {
         const {error}=await supabaseClient.from('task_lists').upsert({user_id:state.cloudUser.id,tasks:state.tasks,updated_at:new Date().toISOString()},{onConflict:'user_id'});
-        if (error) throw error; state.lastSync=new Date(); setCloudStatus('online','Sincronizado');
+        if (error) throw error;
+        if (state.cloudRevision===revision) { state.cloudDirty=false; state.lastSync=new Date(); setCloudStatus('online','Sincronizado'); }
+        else { cloudSaveTimer=setTimeout(pushToCloud,100); }
       } catch (error) { console.error(error); setCloudStatus('offline','Cambios pendientes'); toast('Los cambios están guardados en este dispositivo, pero no se pudieron subir.'); }
       finally { state.cloudBusy=false; updateLastSyncText(); }
     }
     async function pullFromCloud() {
-      if (!supabaseClient || !state.cloudUser || state.cloudBusy) return;
+      if (!supabaseClient || !state.cloudUser || state.cloudBusy || state.cloudDirty || cloudSaveTimer) return;
       setCloudStatus('syncing','Actualizando…');
       try {
         const {data,error}=await supabaseClient.from('task_lists').select('tasks').eq('user_id',state.cloudUser.id).maybeSingle(); if (error) throw error;
@@ -609,7 +614,7 @@
     function subscribeRealtime() {
       stopRealtime();
       cloudSubscription=supabaseClient.channel(`tasks-${state.cloudUser.id}`).on('postgres_changes',{event:'UPDATE',schema:'public',table:'task_lists',filter:`user_id=eq.${state.cloudUser.id}`},payload=>{
-        if (state.cloudBusy) return; const clean=Array.isArray(payload.new.tasks)?payload.new.tasks.map(sanitizeTask):[]; if(clean.some(t=>!t)) return;
+        if (state.cloudBusy || state.cloudDirty) return; const clean=Array.isArray(payload.new.tasks)?payload.new.tasks.map(sanitizeTask):[]; if(clean.some(t=>!t)) return;
         state.suppressCloudSave=true; state.tasks=clean; save(); state.suppressCloudSave=false; state.lastSync=new Date(); renderAll(); setCloudStatus('online','Sincronizado'); updateLastSyncText();
       }).subscribe();
     }
