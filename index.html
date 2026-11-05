@@ -45,6 +45,11 @@
     .tab:hover { background:var(--surface-2); color:var(--text); }
     .tab[aria-selected="true"] { background:var(--surface); color:var(--primary); box-shadow:0 2px 10px rgba(30,45,55,.08); }
     .header-actions { display:flex; gap:8px; }
+    .cloud-button { display:flex; align-items:center; gap:7px; }
+    .cloud-dot { width:8px; height:8px; border-radius:50%; background:#8a98a3; }
+    .cloud-button.online .cloud-dot { background:#39a76b; box-shadow:0 0 0 3px color-mix(in srgb,#39a76b 18%,transparent); }
+    .cloud-button.syncing .cloud-dot { background:#d18b22; animation:pulse 1s infinite alternate; }
+    @keyframes pulse { to { opacity:.35; } }
     .btn { min-height:40px; border:1px solid var(--line); border-radius:10px; padding:8px 13px; background:var(--surface); font-weight:650; }
     .btn:hover { background:var(--surface-2); }
     .btn-primary { border-color:var(--primary); background:var(--primary); color:var(--on-primary); }
@@ -187,6 +192,7 @@
         <button class="tab" role="tab" aria-selected="false" data-view="week">Semana</button>
       </nav>
       <div class="header-actions">
+        <button class="btn cloud-button" id="cloudButton" type="button" aria-label="Configurar sincronización"><span class="cloud-dot" aria-hidden="true"></span><span class="cloud-label">Sin conexión</span></button>
         <button class="btn icon-btn" id="themeButton" type="button" aria-label="Activar modo oscuro" title="Cambiar tema">☾</button>
         <button class="btn" id="backupButton" type="button"><span aria-hidden="true">↕ </span><span class="backup-label">Copias</span></button>
       </div>
@@ -253,14 +259,37 @@
     </div>
     <div class="modal-actions"><button class="btn close-modal" type="button">Cerrar</button></div>
   </dialog>
+  <dialog id="cloudDialog" aria-labelledby="cloudTitle">
+    <div class="modal-head"><h2 id="cloudTitle">Sincronización en la nube</h2><button class="close-modal" type="button" aria-label="Cerrar">×</button></div>
+    <div class="modal-body" id="cloudSetupPanel">
+      <p class="field-full">Introduce los datos públicos de tu proyecto Supabase. Se guardarán únicamente en este navegador.</p>
+      <div class="field field-full"><label for="cloudUrl">URL del proyecto</label><input id="cloudUrl" type="url" placeholder="https://xxxxxxxx.supabase.co" autocomplete="off"></div>
+      <div class="field field-full"><label for="cloudKey">Clave publicable</label><input id="cloudKey" type="text" placeholder="sb_publishable_…" autocomplete="off"></div>
+      <div class="field-full"><button class="btn btn-primary" id="saveCloudConfig" type="button">Guardar configuración</button></div>
+    </div>
+    <form class="modal-body hidden" id="authPanel">
+      <p class="field-full">Usa la misma cuenta en el ordenador y en el móvil para compartir las tareas.</p>
+      <div class="field field-full"><label for="authEmail">Correo electrónico</label><input id="authEmail" type="email" required autocomplete="email"></div>
+      <div class="field field-full"><label for="authPassword">Contraseña</label><input id="authPassword" type="password" minlength="8" required autocomplete="current-password"></div>
+      <div class="field-full" style="display:flex;flex-wrap:wrap;gap:8px"><button class="btn btn-primary" type="submit">Iniciar sesión</button><button class="btn" id="signUpButton" type="button">Crear cuenta</button><button class="btn" id="changeCloudConfig" type="button">Cambiar configuración</button></div>
+    </form>
+    <div class="modal-body hidden" id="accountPanel" style="display:block">
+      <p>Sesión iniciada como <strong id="cloudEmail"></strong>.</p>
+      <p id="lastSyncText" class="subtitle">Las tareas están sincronizadas.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:16px"><button class="btn btn-primary" id="syncNowButton" type="button">Sincronizar ahora</button><button class="btn" id="signOutButton" type="button">Cerrar sesión</button></div>
+    </div>
+    <div class="modal-actions"><button class="btn close-modal" type="button">Cerrar</button></div>
+  </dialog>
   <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
   'use strict';
   (() => {
     /* ---------- Datos, constantes y fechas locales ---------- */
     const STORAGE_KEY = 'miDia.tareas.v1';
     const THEME_KEY = 'miDia.tema';
+    const CLOUD_CONFIG_KEY = 'miDia.supabase.v1';
     const STATUSES = [
       { id:'hacer', label:'Por hacer' },
       { id:'proceso', label:'En proceso' },
@@ -269,7 +298,8 @@
     const FAMILIES = ['INTEGRA','EXTERNA','Personal'];
     const PRIORITIES = ['Alta','Media','Baja'];
     const priorityOrder = { Alta:0, Media:1, Baja:2 };
-    const state = { tasks:[], view:'today', quickFamily:'', weekStart:null, selectedDate:null, editingId:null };
+    const state = { tasks:[], view:'today', quickFamily:'', weekStart:null, selectedDate:null, editingId:null, cloudUser:null, cloudBusy:false, suppressCloudSave:false, lastSync:null };
+    let supabaseClient=null, cloudSaveTimer=null, cloudSubscription=null;
     const $ = (selector, root=document) => root.querySelector(selector);
     const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 
@@ -313,6 +343,7 @@
     function save() {
       try { localStorage.setItem(STORAGE_KEY,JSON.stringify(state.tasks)); }
       catch (error) { toast('No se han podido guardar los cambios en este navegador.'); console.error(error); }
+      if (!state.suppressCloudSave && state.cloudUser) scheduleCloudSave();
     }
     function load() {
       try {
@@ -505,6 +536,102 @@
     function toggleTheme() { const next=document.documentElement.dataset.theme==='dark'?'light':'dark'; applyTheme(next); try{localStorage.setItem(THEME_KEY,next);}catch{} }
     function toast(message) { const node=el('div',{className:'toast',text:message,attrs:{role:'status'}}); $('#toastRegion').append(node); setTimeout(()=>node.remove(),3500); }
 
+    /* ---------- Cuenta y sincronización con Supabase ---------- */
+    function getCloudConfig() {
+      try { const value=JSON.parse(localStorage.getItem(CLOUD_CONFIG_KEY)||'null'); return value?.url && value?.key ? value : null; } catch { return null; }
+    }
+    function setCloudStatus(status,label) {
+      const button=$('#cloudButton'); button.classList.toggle('online',status==='online'); button.classList.toggle('syncing',status==='syncing'); $('.cloud-label',button).textContent=label;
+    }
+    function showCloudPanel(name) {
+      $('#cloudSetupPanel').classList.toggle('hidden',name!=='setup'); $('#authPanel').classList.toggle('hidden',name!=='auth'); $('#accountPanel').classList.toggle('hidden',name!=='account');
+      if (name==='account') { $('#cloudEmail').textContent=state.cloudUser?.email||''; updateLastSyncText(); }
+    }
+    function updateLastSyncText() {
+      $('#lastSyncText').textContent=state.lastSync ? `Última sincronización: ${new Intl.DateTimeFormat('es-ES',{hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(state.lastSync)}.` : 'Pendiente de sincronización.';
+    }
+    function createCloudClient(config=getCloudConfig()) {
+      if (!config || !window.supabase?.createClient) return null;
+      try { supabaseClient=window.supabase.createClient(config.url,config.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}}); return supabaseClient; }
+      catch (error) { console.error(error); return null; }
+    }
+    async function initializeCloud() {
+      const config=getCloudConfig();
+      if (!config) { setCloudStatus('offline','Configurar nube'); return; }
+      if (!createCloudClient(config)) { setCloudStatus('offline','Nube no disponible'); return; }
+      const {data:{session}}=await supabaseClient.auth.getSession(); state.cloudUser=session?.user||null;
+      supabaseClient.auth.onAuthStateChange((event,session)=>{ state.cloudUser=session?.user||null; if (event==='SIGNED_IN' && state.cloudUser) connectCloud(); if (event==='SIGNED_OUT') { stopRealtime(); setCloudStatus('offline','Iniciar sesión'); } });
+      if (state.cloudUser) await connectCloud(); else setCloudStatus('offline','Iniciar sesión');
+    }
+    async function connectCloud() {
+      if (!supabaseClient || !state.cloudUser || state.cloudBusy) return;
+      state.cloudBusy=true; setCloudStatus('syncing','Sincronizando…');
+      try {
+        const {data,error}=await supabaseClient.from('task_lists').select('tasks,updated_at').eq('user_id',state.cloudUser.id).maybeSingle();
+        if (error) throw error;
+        if (data) {
+          const clean=Array.isArray(data.tasks)?data.tasks.map(sanitizeTask):[];
+          if (clean.some(t=>!t)) throw new Error('La copia de la nube contiene datos no válidos.');
+          state.suppressCloudSave=true; state.tasks=clean; save(); state.suppressCloudSave=false; renderAll();
+        } else await pushToCloud();
+        state.lastSync=new Date(); setCloudStatus('online','Sincronizado'); subscribeRealtime();
+      } catch (error) { console.error(error); setCloudStatus('offline','Error de sincronización'); toast(`No se pudo sincronizar: ${error.message}`); }
+      finally { state.cloudBusy=false; updateLastSyncText(); }
+    }
+    function scheduleCloudSave() { clearTimeout(cloudSaveTimer); setCloudStatus('syncing','Guardando…'); cloudSaveTimer=setTimeout(pushToCloud,650); }
+    async function pushToCloud() {
+      if (!supabaseClient || !state.cloudUser) return;
+      state.cloudBusy=true; setCloudStatus('syncing','Guardando…');
+      try {
+        const {error}=await supabaseClient.from('task_lists').upsert({user_id:state.cloudUser.id,tasks:state.tasks,updated_at:new Date().toISOString()},{onConflict:'user_id'});
+        if (error) throw error; state.lastSync=new Date(); setCloudStatus('online','Sincronizado');
+      } catch (error) { console.error(error); setCloudStatus('offline','Cambios pendientes'); toast('Los cambios están guardados en este dispositivo, pero no se pudieron subir.'); }
+      finally { state.cloudBusy=false; updateLastSyncText(); }
+    }
+    async function pullFromCloud() {
+      if (!supabaseClient || !state.cloudUser || state.cloudBusy) return;
+      setCloudStatus('syncing','Actualizando…');
+      try {
+        const {data,error}=await supabaseClient.from('task_lists').select('tasks').eq('user_id',state.cloudUser.id).maybeSingle(); if (error) throw error;
+        if (data) { const clean=Array.isArray(data.tasks)?data.tasks.map(sanitizeTask):[]; if(clean.some(t=>!t)) throw new Error('Datos no válidos'); state.suppressCloudSave=true; state.tasks=clean; save(); state.suppressCloudSave=false; renderAll(); }
+        state.lastSync=new Date(); setCloudStatus('online','Sincronizado'); updateLastSyncText();
+      } catch(error) { console.error(error); setCloudStatus('offline','Cambios pendientes'); }
+    }
+    function subscribeRealtime() {
+      stopRealtime();
+      cloudSubscription=supabaseClient.channel(`tasks-${state.cloudUser.id}`).on('postgres_changes',{event:'UPDATE',schema:'public',table:'task_lists',filter:`user_id=eq.${state.cloudUser.id}`},payload=>{
+        if (state.cloudBusy) return; const clean=Array.isArray(payload.new.tasks)?payload.new.tasks.map(sanitizeTask):[]; if(clean.some(t=>!t)) return;
+        state.suppressCloudSave=true; state.tasks=clean; save(); state.suppressCloudSave=false; state.lastSync=new Date(); renderAll(); setCloudStatus('online','Sincronizado'); updateLastSyncText();
+      }).subscribe();
+    }
+    function stopRealtime() { if (cloudSubscription && supabaseClient) supabaseClient.removeChannel(cloudSubscription); cloudSubscription=null; }
+    async function saveCloudConfiguration() {
+      const url=$('#cloudUrl').value.trim().replace(/\/$/,''); const key=$('#cloudKey').value.trim();
+      if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url) || !key.startsWith('sb_publishable_')) { toast('Revisa la URL y la clave publicable.'); return; }
+      localStorage.setItem(CLOUD_CONFIG_KEY,JSON.stringify({url,key})); stopRealtime(); supabaseClient=null; createCloudClient({url,key});
+      if (!supabaseClient) { toast('No se pudo iniciar la conexión.'); return; }
+      supabaseClient.auth.onAuthStateChange((event,session)=>{state.cloudUser=session?.user||null;if(event==='SIGNED_IN'&&state.cloudUser)connectCloud();}); showCloudPanel('auth'); setCloudStatus('offline','Iniciar sesión');
+    }
+    async function signIn(event) {
+      event.preventDefault(); if (!supabaseClient) return; const email=$('#authEmail').value.trim(), password=$('#authPassword').value;
+      setCloudStatus('syncing','Accediendo…'); const {data,error}=await supabaseClient.auth.signInWithPassword({email,password});
+      if (error) { setCloudStatus('offline','Iniciar sesión'); toast(error.message); return; }
+      state.cloudUser=data.user; showCloudPanel('account'); closeDialog($('#cloudDialog')); await connectCloud(); toast('Sesión iniciada.');
+    }
+    async function signUp() {
+      if (!supabaseClient) return; const email=$('#authEmail').value.trim(), password=$('#authPassword').value;
+      if (!email || password.length<8) { toast('Introduce un correo válido y una contraseña de al menos 8 caracteres.'); return; }
+      const {data,error}=await supabaseClient.auth.signUp({email,password,options:{emailRedirectTo:location.href.split('#')[0]}});
+      if (error) { toast(error.message); return; }
+      if (data.session) { state.cloudUser=data.user; closeDialog($('#cloudDialog')); await connectCloud(); } else toast('Cuenta creada. Revisa tu correo y confirma el acceso.');
+    }
+    async function signOut() { if (!supabaseClient) return; await supabaseClient.auth.signOut(); state.cloudUser=null; stopRealtime(); showCloudPanel('auth'); setCloudStatus('offline','Iniciar sesión'); toast('Sesión cerrada.'); }
+    function openCloudDialog() {
+      const config=getCloudConfig();
+      if (!config) showCloudPanel('setup'); else if (state.cloudUser) showCloudPanel('account'); else showCloudPanel('auth');
+      $('#cloudUrl').value=config?.url||''; $('#cloudKey').value=config?.key||''; $('#cloudDialog').showModal();
+    }
+
     /* ---------- Eventos e inicio ---------- */
     function bindEvents() {
       $$('.tab').forEach(button=>button.addEventListener('click',()=>setView(button.dataset.view)));
@@ -523,12 +650,14 @@
       $('#backupButton').addEventListener('click',()=>$('#backupDialog').showModal()); $('#exportButton').addEventListener('click',exportJSON); $('#importButton').addEventListener('click',()=>$('#importInput').click()); $('#importInput').addEventListener('change',event=>importJSON(event.target.files[0]));
       $('#resetExamples').addEventListener('click',()=>{ if(confirm('¿Sustituir las tareas actuales por las tareas de ejemplo?')) { state.tasks=exampleTasks(); save(); renderAll(); closeDialog($('#backupDialog')); toast('Ejemplos restaurados.'); } });
       $('#themeButton').addEventListener('click',toggleTheme); setupDragAndDrop();
+      $('#cloudButton').addEventListener('click',openCloudDialog); $('#saveCloudConfig').addEventListener('click',saveCloudConfiguration); $('#authPanel').addEventListener('submit',signIn); $('#signUpButton').addEventListener('click',signUp); $('#signOutButton').addEventListener('click',signOut); $('#syncNowButton').addEventListener('click',pullFromCloud); $('#changeCloudConfig').addEventListener('click',()=>showCloudPanel('setup'));
+      window.addEventListener('focus',()=>{ if(state.cloudUser) pullFromCloud(); }); window.addEventListener('online',()=>{ if(state.cloudUser) pullFromCloud(); });
       let knownDay=localISO(); setInterval(()=>{ if(localISO()!==knownDay){knownDay=localISO();state.weekStart=mondayOf(new Date());renderAll();}},60000);
     }
     function init() {
       load(); state.weekStart=mondayOf(new Date());
       let theme='light'; try { theme=localStorage.getItem(THEME_KEY)||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'); } catch {}
-      applyTheme(theme); bindEvents(); renderAll(); setView('today');
+      applyTheme(theme); bindEvents(); renderAll(); setView('today'); initializeCloud();
     }
     init();
   })();
